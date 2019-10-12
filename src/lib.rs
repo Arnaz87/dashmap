@@ -16,6 +16,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
 use std::fmt::{self, Debug};
+use std::iter::FromIterator;
 use util::map_in_place;
 
 /// DashMap is a threadsafe, versatile and concurrent hashmap with good performance and is balanced for both reads and writes.
@@ -482,24 +483,50 @@ where
     }
 }
 
+fn calculate_optimal_chunks () -> u8 {
+    let vcount = num_cpus::get() * 4;
+
+    let base: usize = 2;
+    let mut p2exp: u32 = 1;
+
+    loop {
+        if vcount <= base.pow(p2exp) {
+            return p2exp.try_into().unwrap();
+        } else {
+            p2exp += 1;
+        }
+    }
+}
+
+impl<K, V> PartialEq for DashMap<K, V>
+where
+    K: Eq + Hash,
+    V: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+
+        self.iter()
+            .all(|entry| other.get(entry.ptr_k).map_or(false, |v| *entry.ptr_v == *v))
+    }
+}
+
+impl<K, V> Eq for DashMap<K, V>
+where
+    K: Eq + Hash,
+    V: Eq,
+{
+}
+
 impl<K, V> Default for DashMap<K, V>
 where
     K: Hash + Eq,
 {
     /// Creates a new DashMap and automagically determines the optimal amount of chunks.
     fn default() -> Self {
-        let vcount = num_cpus::get() * 4;
-
-        let base: usize = 2;
-        let mut p2exp: u32 = 1;
-
-        loop {
-            if vcount <= base.pow(p2exp) {
-                return Self::new(p2exp.try_into().unwrap());
-            } else {
-                p2exp += 1;
-            }
-        }
+        Self::new(calculate_optimal_chunks())
     }
 }
 
@@ -511,6 +538,35 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let entries_iter = self.iter().map(|entry| (entry.ptr_k, entry.ptr_v));
         f.debug_map().entries(entries_iter).finish()
+    }
+}
+
+impl<K, V> Extend<(K, V)> for DashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    #[inline]
+    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        // Would be good to have an extend function
+        let iter = iter.into_iter();
+        iter.for_each(|(k, v)| {
+            self.insert(k, v);
+        });
+    }
+}
+
+impl<K, V> FromIterator<(K, V)> for DashMap<K, V>
+where
+    K: Eq + Hash,
+{
+    #[inline]
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        let iter = iter.into_iter();
+        let map = Self::with_capacity(calculate_optimal_chunks(), iter.size_hint().0);
+        iter.for_each(|(k, v)| {
+            map.insert(k, v);
+        });
+        map
     }
 }
 
@@ -990,5 +1046,57 @@ mod tests {
         }
 
         panic!("no match\n{}", map_debug);
+    }
+
+    #[test]
+    fn eq() {
+        let map_a = DashMap::default();
+        map_a.insert(1i32, 2i32);
+        map_a.insert(3i32, 6i32);
+
+        let map_b = DashMap::default();
+        map_b.insert(1i32, 2i32);
+        map_b.insert(3i32, 6i32);
+
+        let map_c = DashMap::default();
+        map_c.insert(1i32, 2i32);
+        map_c.insert(3i32, 9i32);
+
+        assert_eq!(map_a, map_b);
+        assert!(map_a != map_c);
+    }
+
+    #[test]
+    fn extend() {
+        let map_a = DashMap::default();
+
+        for i in 0..10_i32 {
+            map_a.insert(i, i*2)
+        }
+
+        let mut map_b = DashMap::default();
+
+        for i in 0..5_i32 {
+            map_b.insert(i, i*2)
+        }
+
+        assert!(map_a != map_b);
+
+        let iter = (5..10).map(|i| (i, i*2));
+        map_b.extend(iter);
+
+        assert_eq!(map_a, map_b);
+    }
+
+    #[test]
+    fn from_iterator() {
+        let map_a = DashMap::default();
+        for i in 0..10_i32 {
+            map_a.insert(i, i*2)
+        }
+
+        let map_b = (0..10).map(|i| (i, i*2)).collect();
+
+        assert_eq!(map_a, map_b);
     }
 }
